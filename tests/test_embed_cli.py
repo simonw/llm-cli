@@ -1,3 +1,5 @@
+import os
+
 from click.testing import CliRunner
 from llm.cli import cli
 from llm import Collection
@@ -5,7 +7,6 @@ import json
 import pathlib
 import pytest
 import sqlite_utils
-import sys
 from unittest.mock import ANY
 
 
@@ -423,7 +424,6 @@ def multi_files(tmpdir):
     return db_path, tmpdir / "files"
 
 
-@pytest.mark.xfail(sys.platform == "win32", reason="Expected to fail on Windows")
 @pytest.mark.parametrize("scenario", ("single", "multi"))
 def test_embed_multi_files(multi_files, scenario):
     db_path, files = multi_files
@@ -473,9 +473,9 @@ def test_embed_multi_files(multi_files, scenario):
         assert rows == [
             {"id": "file1.txt", "content": "hello world"},
             {"id": "file2.txt", "content": "goodbye world"},
-            {"id": "nested/more/three.txt", "content": "three"},
-            {"id": "nested/one.txt", "content": "one"},
-            {"id": "nested/two.txt", "content": "two"},
+            {"id": f"nested{os.sep}more{os.sep}three.txt", "content": "three"},
+            {"id": f"nested{os.sep}one.txt", "content": "one"},
+            {"id": f"nested{os.sep}two.txt", "content": "two"},
         ]
     else:
         assert rows == [

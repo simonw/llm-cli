@@ -33,7 +33,7 @@ def test_keys_set(monkeypatch, tmpdir):
     assert keys_path.exists()
     if os.name != "nt":
         # Should be chmod 600
-        assert oct(keys_path.stat().st_mode)[-3:] == "600"
+        assert oct(keys_path.stat().mode)[-3:] == "600"
     else:
         # Windows file permissions don't work that way.
         pass

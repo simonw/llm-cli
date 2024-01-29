@@ -2,7 +2,6 @@ from click.testing import CliRunner
 import llm.cli
 from unittest.mock import ANY
 import pytest
-import sys
 
 
 def test_mock_model(mock_model):
@@ -17,7 +16,6 @@ def test_mock_model(mock_model):
     assert response2.text() == "second"
 
 
-@pytest.mark.xfail(sys.platform == "win32", reason="Expected to fail on Windows")
 def test_chat_basic(mock_model, logs_db):
     runner = CliRunner()
     mock_model.enqueue(["one world"])
@@ -114,7 +112,6 @@ def test_chat_basic(mock_model, logs_db):
     ]
 
 
-@pytest.mark.xfail(sys.platform == "win32", reason="Expected to fail on Windows")
 def test_chat_system(mock_model, logs_db):
     runner = CliRunner()
     mock_model.enqueue(["I am mean"])
@@ -151,7 +148,6 @@ def test_chat_system(mock_model, logs_db):
     ]
 
 
-@pytest.mark.xfail(sys.platform == "win32", reason="Expected to fail on Windows")
 def test_chat_options(mock_model, logs_db):
     runner = CliRunner()
     mock_model.enqueue(["Some text"])
@@ -179,7 +175,6 @@ def test_chat_options(mock_model, logs_db):
     ]
 
 
-@pytest.mark.xfail(sys.platform == "win32", reason="Expected to fail on Windows")
 @pytest.mark.parametrize(
     "input,expected",
     (

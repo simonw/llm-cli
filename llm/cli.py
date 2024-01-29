@@ -1,3 +1,5 @@
+import os
+
 import click
 from click_default_group import DefaultGroup
 from dataclasses import asdict
@@ -342,8 +344,11 @@ def chat(
     Hold an ongoing chat with a model.
     """
     # Left and right arrow keys to move cursor:
-    readline.parse_and_bind("\\e[D: backward-char")
-    readline.parse_and_bind("\\e[C: forward-char")
+    if os.name != "nt":
+        # I'm pretty sure this can't be done without win32 API calls.
+        # pyreadline is unsupported and no longer python 3.12 compatible.
+        readline.parse_and_bind("\\e[D: backward-char")
+        readline.parse_and_bind("\\e[C: forward-char")
     log_path = logs_db_path()
     (log_path.parent).mkdir(parents=True, exist_ok=True)
     db = sqlite_utils.Database(log_path)

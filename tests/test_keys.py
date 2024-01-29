@@ -1,12 +1,12 @@
+import os
+from pathlib import Path
 from click.testing import CliRunner
 import json
 from llm.cli import cli
 import pathlib
 import pytest
-import sys
 
 
-@pytest.mark.xfail(sys.platform == "win32", reason="Expected to fail on Windows")
 @pytest.mark.parametrize("env", ({}, {"LLM_USER_PATH": "/tmp/llm-keys-test"}))
 def test_keys_in_user_path(monkeypatch, env, user_path):
     for key, value in env.items():
@@ -15,13 +15,13 @@ def test_keys_in_user_path(monkeypatch, env, user_path):
     result = runner.invoke(cli, ["keys", "path"])
     assert result.exit_code == 0
     if env:
-        expected = env["LLM_USER_PATH"] + "/keys.json"
+        expected_path = Path(env["LLM_USER_PATH"]) / "keys.json"
     else:
-        expected = user_path + "/keys.json"
+        expected_path = Path(user_path) / "keys.json"
+    expected = str(expected_path)
     assert result.output.strip() == expected
 
 
-@pytest.mark.xfail(sys.platform == "win32", reason="Expected to fail on Windows")
 def test_keys_set(monkeypatch, tmpdir):
     user_path = tmpdir / "user/keys"
     monkeypatch.setenv("LLM_USER_PATH", str(user_path))
@@ -31,8 +31,12 @@ def test_keys_set(monkeypatch, tmpdir):
     result = runner.invoke(cli, ["keys", "set", "openai"], input="foo")
     assert result.exit_code == 0
     assert keys_path.exists()
-    # Should be chmod 600
-    assert oct(keys_path.stat().mode)[-3:] == "600"
+    if os.name != "nt":
+        # Should be chmod 600
+        assert oct(keys_path.stat().mode)[-3:] == "600"
+    else:
+        # Windows file permissions don't work that way.
+        pass
     content = keys_path.read_text("utf-8")
     assert json.loads(content) == {
         "// Note": "This file stores secret API credentials. Do not share!",

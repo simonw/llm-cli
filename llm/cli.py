@@ -38,10 +38,12 @@ from llm.models import _BaseConversation
 from .migrations import migrate
 from .plugins import pm, load_plugins
 from .utils import (
-    mimetype_from_path,
-    mimetype_from_string,
     token_usage_string,
     extract_fenced_code_block,
+    FragmentString,
+    ensure_fragment,
+    mimetype_from_path,
+    mimetype_from_string,
 )
 import base64
 import httpx
@@ -54,13 +56,66 @@ import sqlite_utils
 from sqlite_utils.utils import rows_from_file, Format
 import sys
 import textwrap
-from typing import cast, Optional, Iterable, Union, Tuple
+from typing import cast, Optional, Iterable, List, Union, Tuple
 import warnings
 import yaml
 
 warnings.simplefilter("ignore", ResourceWarning)
 
 DEFAULT_TEMPLATE = "prompt: "
+
+
+class FragmentNotFound(Exception):
+    pass
+
+
+def resolve_fragments(
+    db: sqlite_utils.Database, fragments: Iterable[str]
+) -> List[FragmentString]:
+    """
+    Resolve fragments into a list of (content, source) tuples
+    """
+
+    def _load_by_alias(fragment):
+        rows = list(
+            db.query(
+                """
+                select content, source from fragments
+                join fragment_aliases on fragments.id = fragment_aliases.fragment_id
+                where alias = :alias or hash = :alias limit 1
+                """,
+                {"alias": fragment},
+            )
+        )
+        if rows:
+            row = rows[0]
+            return row["content"], row["source"]
+        return None, None
+
+    # These can be URLs or paths
+    resolved = []
+    for fragment in fragments:
+        if fragment.startswith("http://") or fragment.startswith("https://"):
+            response = httpx.get(fragment, follow_redirects=True)
+            response.raise_for_status()
+            resolved.append(FragmentString(response.text, fragment))
+        elif fragment == "-":
+            resolved.append(FragmentString(sys.stdin.read(), "-"))
+        else:
+            # Try from the DB
+            content, source = _load_by_alias(fragment)
+            if content is not None:
+                resolved.append(FragmentString(content, source))
+            else:
+                # Now try path
+                path = pathlib.Path(fragment)
+                if path.exists():
+                    resolved.append(
+                        FragmentString(path.read_text(), str(path.resolve()))
+                    )
+                else:
+                    raise FragmentNotFound(f"Fragment '{fragment}' not found")
+    return resolved
 
 
 class AttachmentType(click.ParamType):
@@ -184,6 +239,20 @@ def cli():
     multiple=True,
     help="key/value options for the model",
 )
+@click.option(
+    "fragments",
+    "-f",
+    "--fragment",
+    multiple=True,
+    help="Fragment (alias, URL, hash or file path) to add to the prompt",
+)
+@click.option(
+    "system_fragments",
+    "--sf",
+    "--system-fragment",
+    multiple=True,
+    help="Fragment to add to system prompt",
+)
 @click.option("-t", "--template", help="Template to use")
 @click.option(
     "-p",
@@ -228,6 +297,8 @@ def prompt(
     attachments,
     attachment_types,
     options,
+    fragments,
+    system_fragments,
     template,
     param,
     no_stream,
@@ -274,6 +345,11 @@ def prompt(
 
     model_aliases = get_model_aliases()
 
+    log_path = logs_db_path()
+    (log_path.parent).mkdir(parents=True, exist_ok=True)
+    db = sqlite_utils.Database(log_path)
+    migrate(db)
+
     def read_prompt():
         nonlocal prompt
 
@@ -294,6 +370,7 @@ def prompt(
             and sys.stdin.isatty()
             and not attachments
             and not attachment_types
+            and not fragments
         ):
             # Hang waiting for input to stdin (unless --save)
             prompt = sys.stdin.read()
@@ -416,6 +493,12 @@ def prompt(
     prompt = read_prompt()
     response = None
 
+    try:
+        fragments = resolve_fragments(db, fragments)
+        system_fragments = resolve_fragments(db, system_fragments)
+    except FragmentNotFound as ex:
+        raise click.ClickException(str(ex))
+
     prompt_method = model.prompt
     if conversation:
         prompt_method = conversation.prompt
@@ -427,8 +510,10 @@ def prompt(
                 if should_stream:
                     response = prompt_method(
                         prompt,
+                        fragments=fragments,
                         attachments=resolved_attachments,
                         system=system,
+                        system_fragments=system_fragments,
                         **kwargs,
                     )
                     async for chunk in response:
@@ -438,8 +523,10 @@ def prompt(
                 else:
                     response = prompt_method(
                         prompt,
+                        fragments=fragments,
                         attachments=resolved_attachments,
                         system=system,
+                        system_fragments=system_fragments,
                         **kwargs,
                     )
                     text = await response.text()
@@ -454,8 +541,10 @@ def prompt(
         else:
             response = prompt_method(
                 prompt,
+                fragments=fragments,
                 attachments=resolved_attachments,
                 system=system,
+                system_fragments=system_fragments,
                 **kwargs,
             )
             if should_stream:
@@ -1389,6 +1478,132 @@ def aliases_remove(alias):
 def aliases_path():
     "Output the path to the aliases.json file"
     click.echo(user_dir() / "aliases.json")
+
+
+@cli.group(
+    cls=DefaultGroup,
+    default="list",
+    default_if_no_args=True,
+)
+def fragments():
+    "Manage fragments"
+
+
+@fragments.command(name="list")
+@click.option(
+    "queries",
+    "-q",
+    "--query",
+    multiple=True,
+    help="Search for fragments matching these strings",
+)
+@click.option("json_", "--json", is_flag=True, help="Output as JSON")
+def fragments_list(queries, json_):
+    "List current fragments"
+    db = sqlite_utils.Database(logs_db_path())
+    migrate(db)
+    params = {}
+    param_count = 0
+    where_bits = []
+    for q in queries:
+        param_count += 1
+        p = f"p{param_count}"
+        params[p] = q
+        where_bits.append(
+            f"""
+            (fragments.hash = :{p} or fragment_aliases.alias = :{p}
+            or fragments.source like '%' || :{p} || '%'
+            or fragments.content like '%' || :{p} || '%')
+        """
+        )
+    where = "\n      and\n  ".join(where_bits)
+    if where:
+        where = " where " + where
+    sql = """
+    select
+        fragments.hash,
+        json_group_array(fragment_aliases.alias) filter (
+            where
+            fragment_aliases.alias is not null
+        ) as aliases,
+        fragments.datetime_utc,
+        fragments.source,
+        fragments.content
+    from
+        fragments
+    left join
+        fragment_aliases on fragment_aliases.fragment_id = fragments.id
+    {where}
+    group by
+        fragments.id, fragments.hash, fragments.content, fragments.datetime_utc, fragments.source;
+    """.format(
+        where=where
+    )
+    results = list(db.query(sql, params))
+    for result in results:
+        result["aliases"] = json.loads(result["aliases"])
+    if json_:
+        click.echo(json.dumps(results, indent=4))
+    else:
+        yaml.add_representer(
+            str,
+            lambda dumper, data: dumper.represent_scalar(
+                "tag:yaml.org,2002:str", data, style="|" if "\n" in data else None
+            ),
+        )
+        for result in results:
+            result["content"] = _truncate_string(result["content"])
+            click.echo(yaml.dump([result], sort_keys=False, width=sys.maxsize).strip())
+
+
+@fragments.command(name="set")
+@click.argument("alias")
+@click.argument("fragment")
+def fragments_set(alias, fragment):
+    """
+    Set an alias for a fragment
+
+    Accepts an alias and a file path, URL, hash or '-' for stdin
+
+    Example usage:
+
+    \b
+        llm fragments set docs ./docs.md
+    """
+    db = sqlite_utils.Database(logs_db_path())
+    try:
+        resolved = resolve_fragments(db, [fragment])[0]
+    except FragmentNotFound as ex:
+        raise click.ClickException(str(ex))
+    migrate(db)
+    alias_sql = """
+    insert into fragment_aliases (alias, fragment_id)
+    values (:alias, :fragment_id)
+    on conflict(alias) do update set
+        fragment_id = excluded.fragment_id;
+    """
+    with db.conn:
+        fragment_id = ensure_fragment(db, resolved)
+        db.conn.execute(alias_sql, {"alias": alias, "fragment_id": fragment_id})
+
+
+@fragments.command(name="remove")
+@click.argument("alias")
+def fragments_remove(alias):
+    """
+    Remove a fragment alias
+
+    Example usage:
+
+    \b
+        llm fragments remove docs
+    """
+    db = sqlite_utils.Database(logs_db_path())
+    migrate(db)
+    with db.conn:
+        db.conn.execute(
+            "delete from fragment_aliases where alias = :alias", {"alias": alias}
+        )
 
 
 @cli.command(name="plugins")
